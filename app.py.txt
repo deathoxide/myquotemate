@@ -1,0 +1,141 @@
+import os
+import re
+from flask import Flask, request, render_template_string
+from werkzeug.utils import secure_filename
+from openai import OpenAI
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+app.config["UPLOAD_FOLDER"] = "uploads"
+
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
+ALLOWED_EXTENSIONS = {"pdf"}
+
+SYSTEM_PROMPT = """
+You are MyQuoteMate, an Australia-focused tradie quote checker.
+
+Your role is to help homeowners and small businesses understand a tradie quote in plain English, identify potential red flags, and prepare smart follow-up questions before accepting or paying.
+
+Rules:
+- Do NOT provide legal advice.
+- Do NOT claim exact market prices.
+- Use cautious wording such as "may", "often", "typically".
+- Assume the user is Australian unless stated otherwise.
+- Use Australian terminology like GST, call-out fee, licensed tradie.
+- Be neutral and non-accusatory.
+
+Output MUST follow this structure exactly:
+
+1. Verdict (Looks reasonable | Possibly high | Needs clarification)
+2. Quick summary (3–6 bullet points)
+3. Quote breakdown
+4. Red flags or risks
+5. Missing or unclear scope
+6. Questions to ask the tradie (8–12)
+7. Suggested email to request clarification
+8. Disclaimer
+"""
+
+HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MyQuoteMate</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 30px auto; }
+    textarea, input, select { width: 100%; padding: 10px; margin-bottom: 12px; }
+    button { padding: 12px 16px; font-weight: bold; }
+    pre { white-space: pre-wrap; background: #111; color: #eee; padding: 15px; }
+    .error { color: red; }
+  </style>
+</head>
+<body>
+  <h1>MyQuoteMate</h1>
+  <p>Paste your tradie quote below. For best results, include trade type and suburb.</p>
+
+  <form method="POST" enctype="multipart/form-data">
+    <label>Trade type</label>
+    <select name="trade">
+      <option>Plumbing</option>
+      <option>Electrical</option>
+      <option>Renovation</option>
+      <option>Hot Water</option>
+      <option>Roofing</option>
+      <option>Painting</option>
+      <option>Fencing</option>
+      <option>Other</option>
+    </select>
+
+    <label>Location (Suburb, State)</label>
+    <input name="location">
+
+    <label>Paste quote text</label>
+    <textarea name="quote_text" rows="8"></textarea>
+
+    <label>Upload quote PDF (optional)</label>
+    <input type="file" name="quote_pdf" accept="application/pdf">
+
+    <button type="submit">Check my quote</button>
+  </form>
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% endif %}
+
+  {% if result %}
+    <h2>Result</h2>
+    <pre>{{ result }}</pre>
+  {% endif %}
+</body>
+</html>
+"""
+
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "GET":
+        return render_template_string(HTML)
+
+    trade = request.form.get("trade", "")
+    location = request.form.get("location", "")
+    quote_text = request.form.get("quote_text", "")
+
+    pdf_text = ""
+    file = request.files.get("quote_pdf")
+    if file and file.filename and allowed_file(file.filename):
+        path = os.path.join(app.config["UPLOAD_FOLDER"], secure_filename(file.filename))
+        file.save(path)
+
+    if not quote_text:
+        return render_template_string(HTML, error="Please paste the quote text.")
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return render_template_string(HTML, error="OPENAI_API_KEY not set.")
+
+    client = OpenAI(api_key=api_key)
+
+    user_input = f"""
+Trade: {trade}
+Location: {location}
+
+Quote:
+{quote_text}
+"""
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_input}
+        ]
+    )
+
+    return render_template_string(HTML, result=response.output_text)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
